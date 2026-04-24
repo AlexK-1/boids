@@ -1,4 +1,4 @@
-// compile: cc main.c -o boids -lraylib -O2
+// compile: cc main.c -o boids -lraylib -lm -O2
 
 #include <raylib.h>
 #include <raymath.h>
@@ -253,12 +253,33 @@ int main(int argc, char *argv[]) {
     const BoidIndex maxNeighbors = 9 * CHUNK_SIZE_BOIDS;
     BoidIndex boidNeighbors[maxNeighbors];
 
+    Camera2D camera = { 0 };
+    camera.zoom = 1.0f;
+
     while (!WindowShouldClose()) {
+        // Keys
         if (IsKeyPressed(KEY_SPACE)) pause = !pause;
         if (IsKeyPressed(KEY_S)) showVisibleCircles = !showVisibleCircles;
         if (IsKeyPressed(KEY_C)) mouseAvoid = !mouseAvoid;
 
-        Vector2 mousePosition = GetMousePosition();
+        // Camera
+        float wheel = GetMouseWheelMove();
+        if (IsKeyPressed(KEY_MINUS) || IsKeyPressed(KEY_KP_SUBTRACT)) wheel = -1.0;
+        if (IsKeyPressed(KEY_KP_ADD) || (IsKeyPressed(KEY_EQUAL) && (IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT)))) wheel = 1.0;
+        if (wheel != 0) {
+            Vector2 mouseWorldPos = GetScreenToWorld2D(GetMousePosition(), camera);
+            camera.offset = GetMousePosition();
+            camera.target = mouseWorldPos;
+            float scale = 0.2f*wheel;
+            camera.zoom = Clamp(expf(logf(camera.zoom)+scale), 0.125f, 64.0f);
+        }
+        if (IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+            Vector2 delta = GetMouseDelta();
+            delta = Vector2Scale(delta, -1.0f/camera.zoom);
+            camera.target = Vector2Add(camera.target, delta);
+        }
+
+        Vector2 mousePosition = GetScreenToWorld2D(GetMousePosition(), camera);
         int screenWidth = GetScreenWidth();
         int screenHeight = GetScreenHeight();
         
@@ -285,6 +306,7 @@ int main(int argc, char *argv[]) {
 
         BeginDrawing();
             ClearBackground(RAYWHITE);
+            BeginMode2D(camera);
 
             // Draw boid's visible area
             if (showVisibleCircles) {
@@ -305,10 +327,12 @@ int main(int argc, char *argv[]) {
             if (mouseAvoid)
                 DrawCircleV(mousePosition, BOID_MOUSE_AVOID_RADIUS, (Color){230, 41, 55, 10});
 
+            EndMode2D();
+
             // Draw "Paused" label, if the simulation is paused
             if (pause)
                 DrawText("Paused", screenWidth - 85, 10, 20, BLACK);
-
+            
             DrawFPS(10, 10);
         EndDrawing();
     }
