@@ -40,86 +40,15 @@ typedef struct {
 
 
 // Push the boid away from the bound
-void BoidBound(Boid *boid) {
+void BoidBound(Boid *boid, int screenWidth, int screenHeight) {
     if (boid->pos.x < BOID_BOUND_PADDING)
         boid->speed.x += BOID_BOUND_FACTOR;
-    else if (boid->pos.x > GetScreenWidth()-BOID_BOUND_PADDING)
+    else if (boid->pos.x > screenWidth-BOID_BOUND_PADDING)
         boid->speed.x -= BOID_BOUND_FACTOR;
     if (boid->pos.y < BOID_BOUND_PADDING)
         boid->speed.y += BOID_BOUND_FACTOR;
-    else if (boid->pos.y > GetScreenHeight()-BOID_BOUND_PADDING)
+    else if (boid->pos.y > screenHeight-BOID_BOUND_PADDING)
         boid->speed.y -= BOID_BOUND_FACTOR;
-}
-
-// Steer to avoid crowding local flockmates
-void BoidAvoid(Boid *boids, size_t boidIndex, bool mouseAvoid) {
-    Boid *boid = &boids[boidIndex];
-    Vector2 close = { 0 };
-
-    for (size_t i = 0; i < BOIDS_COUNT; i++) {
-        if (i == boidIndex) continue;
-        Boid *otherBoid = &boids[i];
-
-        Vector2 distance = Vector2Subtract(boid->pos, otherBoid->pos);
-        if (Vector2LengthSqr(distance) < BOID_AVOID_RADIUS_SQ)
-            close = Vector2Add(close, distance);
-    }
-
-    // Avoid mouse
-    if (mouseAvoid) {
-        Vector2 distance = Vector2Subtract(boid->pos, GetMousePosition());
-        if (Vector2LengthSqr(distance) < BOID_MOUSE_AVOID_RADIUS_SQ)
-            close = Vector2Add(close, Vector2Scale(distance, 3));
-    }
-
-    boid->speed = Vector2Add(boid->speed, Vector2Scale(close, BOID_AVOID_FACTOR));
-}
-
-// Steer towards the average heading of local flockmates
-void BoidAlign(Boid *boids, size_t boidIndex) {
-    Boid *boid = &boids[boidIndex];
-    size_t neighborsCount = 0;
-    Vector2 neighborsSpeed = { 0 };
-
-    for (size_t i = 0; i < BOIDS_COUNT; i++) {
-        if (i == boidIndex) continue;
-        Boid *otherBoid = &boids[i];
-
-        Vector2 distance = Vector2Subtract(boid->pos, otherBoid->pos);
-        if (Vector2LengthSqr(distance) < BOID_VISIBLE_RADIUS_SQ) {
-            neighborsCount++;
-            neighborsSpeed = Vector2Add(neighborsSpeed, otherBoid->speed);
-        }
-    }
-
-    if (neighborsCount > 0) {
-        neighborsSpeed = Vector2Scale(neighborsSpeed, 1.0f / neighborsCount);
-        boid->speed = Vector2Add(boid->speed, Vector2Scale(neighborsSpeed, BOID_ALIGNMENT_FACTOR));
-    }
-}
-
-// Steer to move towards the average position (center of mass) of local flockmates
-void BoidCohesion(Boid* boids, size_t boidIndex) {
-    Boid *boid = &boids[boidIndex];
-    size_t neighborsCount = 0;
-    Vector2 neighborsPos = { 0 };
-
-    for (size_t i = 0; i < BOIDS_COUNT; i++) {
-        if (i == boidIndex) continue;
-        Boid *otherBoid = &boids[i];
-
-        Vector2 distance = Vector2Subtract(boid->pos, otherBoid->pos);
-        if (Vector2LengthSqr(distance) < BOID_VISIBLE_RADIUS_SQ) {
-            neighborsCount++;
-            neighborsPos = Vector2Add(neighborsPos, otherBoid->pos);
-        }
-    }
-
-    if (neighborsCount > 0) {
-        neighborsPos = Vector2Scale(neighborsPos, 1.0f / neighborsCount);
-        neighborsPos = Vector2Subtract(neighborsPos, boid->pos);
-        boid->speed = Vector2Add(boid->speed, Vector2Scale(neighborsPos, BOID_COHESION_FACTOR));
-    }
 }
 
 // Speed up or slow down the boid so that its speed is between BOID_MIN_SPEED and BOID_MAX_SPEED
@@ -133,8 +62,61 @@ void BoidNormalSpeed(Boid *boid) {
         boid->speed = Vector2Scale(boid->speed, BOID_MIN_SPEED/speed);
 }
 
+// Update boid rules:
+//  1. separation: steer to avoid crowding local flockmates
+//  2. alignment: steer towards the average heading of local flockmates
+//  3. cohesion: steer to move towards the average position (center of mass) of local flockmates
+void UpdateBoid(Boid *boids, size_t boidIndex, bool mouseAvoid, Vector2 mousePosition) {
+    Boid *boid = &boids[boidIndex];
+    Vector2 close = { 0 }; // Avoid vector
+    size_t neighborsCount = 0;
+    Vector2 neighborsSpeed = { 0 }; // Alignment speed vector
+    Vector2 neighborsPos = { 0 }; // Cohesion position vector
+    
+    for (size_t i = 0; i < BOIDS_COUNT; i++) {
+        if (i == boidIndex) continue;
+
+        Boid *otherBoid = &boids[i];
+        Vector2 distanceV = Vector2Subtract(boid->pos, otherBoid->pos);
+        float distance_sqr = Vector2LengthSqr(distanceV);
+        
+        // Calculate avoid
+        if (distance_sqr < BOID_AVOID_RADIUS_SQ)
+            close = Vector2Add(close, distanceV);
+        
+        if (distance_sqr < BOID_VISIBLE_RADIUS_SQ && distance_sqr > BOID_AVOID_RADIUS_SQ) {
+            neighborsCount++;
+            neighborsSpeed = Vector2Add(neighborsSpeed, otherBoid->speed); // Calculate alignment
+            neighborsPos = Vector2Add(neighborsPos, otherBoid->pos); // Calculate cohesion
+        }
+    }
+
+    // Alignment
+    if (neighborsCount > 0) {
+        neighborsSpeed = Vector2Scale(neighborsSpeed, 1.0f / neighborsCount);
+        boid->speed = Vector2Add(boid->speed, Vector2Scale(neighborsSpeed, BOID_ALIGNMENT_FACTOR));
+    }
+    
+    // Cohesion
+    if (neighborsCount > 0) {
+        neighborsPos = Vector2Scale(neighborsPos, 1.0f / neighborsCount);
+        neighborsPos = Vector2Subtract(neighborsPos, boid->pos);
+        boid->speed = Vector2Add(boid->speed, Vector2Scale(neighborsPos, BOID_COHESION_FACTOR));
+    }
+
+    // Avoid mouse
+    if (mouseAvoid) {
+        Vector2 distance = Vector2Subtract(boid->pos, mousePosition);
+        if (Vector2LengthSqr(distance) < BOID_MOUSE_AVOID_RADIUS_SQ)
+            close = Vector2Add(close, Vector2Scale(distance, 3));
+    }
+
+    // Avoid
+    boid->speed = Vector2Add(boid->speed, Vector2Scale(close, BOID_AVOID_FACTOR));
+}
+
 // Drawing boid's rotated triangle
-void DrawBoid(Boid *boid) {
+void DrawBoid(Boid *boid, Color color) {
     Vector2 normalSpeed = Vector2Normalize(boid->visualSpeed);
     float sinRotation = normalSpeed.x;
     float cosRotation = -normalSpeed.y;
@@ -148,7 +130,7 @@ void DrawBoid(Boid *boid) {
     Vector2 p3 = {boid->pos.x + (BOID_WIDTH/2.0)*cosRotation - (BOID_HEIGHT/2.0)*sinRotation,
                   boid->pos.y + (BOID_WIDTH/2.0)*sinRotation + (BOID_HEIGHT/2.0)*cosRotation};
 
-    DrawTriangle(p1, p2, p3, BLUE);
+    DrawTriangle(p1, p2, p3, color);
 }
 
 
@@ -173,16 +155,18 @@ int main(int argc, char *argv[]) {
         if (IsKeyPressed(KEY_SPACE)) pause = !pause;
         if (IsKeyPressed(KEY_S)) showVisibleCircles = !showVisibleCircles;
         if (IsKeyPressed(KEY_C)) mouseAvoid = !mouseAvoid;
+
+        Vector2 mousePosition = GetMousePosition();
+        int screenWidth = GetScreenWidth();
+        int screenHeight = GetScreenHeight();
         
         if (!pause) {
             for (size_t i = 0; i < BOIDS_COUNT; i++) {
                 Boid *boid = &boids[i];
                 // Vector2 oldSpeed = boid->speed;
 
-                BoidBound(boid);
-                BoidAlign(boids, i);
-                BoidCohesion(boids, i);
-                BoidAvoid(boids, i, mouseAvoid);
+                BoidBound(boid, screenWidth, screenHeight);
+                UpdateBoid(boids, i, mouseAvoid, mousePosition);
                 BoidNormalSpeed(boid);
 
                 boid->visualSpeed.x = boid->visualSpeed.x*0.95f + boid->speed.x*0.05f;
@@ -196,24 +180,28 @@ int main(int argc, char *argv[]) {
         BeginDrawing();
             ClearBackground(RAYWHITE);
 
+            // Draw boid's visible area
+            if (showVisibleCircles) {
+                for (size_t i = 0; i < BOIDS_COUNT; i++) {
+                    Boid *boid = &boids[i];
+                    DrawCircleV(boid->pos, BOID_VISIBLE_RADIUS, (i == 0)? (Color){230, 41, 55, 10} : (Color){0, 121, 241, 10});                
+                }
+            }
+
+            // Draw boids
             for (size_t i = 0; i < BOIDS_COUNT; i++) {
                 Boid *boid = &boids[i];
-                DrawBoid(boid);
-                if (showVisibleCircles)
-                    DrawCircleV(boid->pos, BOID_VISIBLE_RADIUS, (Color){0, 121, 241, 10}); // Draw boid's visible area
+                DrawBoid(boid, (i == 0)? RED : BLUE);
                 // DrawText(TextFormat("%d", i), boid->pos.x, boid->pos.y, 20, BLACK);
             }
 
-            // for (size_t i = 0; i < BOIDS_COUNT; i++) {
-            //     Boid *boid = &boids[i];
-            //     DrawText(TextFormat("%d: %.3f %.3f %.3f", i, boid->speed.x, boid->speed.y, Vector2Length(boid->speed)), 10, 10 + i*30, 20, BLACK);
-            // }
-
+            // Draw a circle around the mouse
             if (mouseAvoid)
-                DrawCircleV(GetMousePosition(), BOID_MOUSE_AVOID_RADIUS, (Color){230, 41, 55, 10});
+                DrawCircleV(mousePosition, BOID_MOUSE_AVOID_RADIUS, (Color){230, 41, 55, 10});
 
+            // Draw "Paused" label, if the simulation is paused
             if (pause)
-                DrawText("Paused", GetScreenWidth() - 85, 10, 20, BLACK);
+                DrawText("Paused", screenWidth - 85, 10, 20, BLACK);
 
             DrawFPS(10, 10);
         EndDrawing();
