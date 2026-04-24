@@ -2,9 +2,11 @@
 
 #include <raylib.h>
 #include <raymath.h>
-#include <stddef.h>
 #include <stdlib.h>
 #include <stdbool.h>
+#include <stdint.h>
+
+// <======================================== MACROS AND DEFINITIONS ========================================>
 
 #define WINDOW_WIDTH 800
 #define WINDOW_HEIGHT 450
@@ -24,20 +26,115 @@
 #define BOID_BOUND_FACTOR 0.08f
 #define BOID_AVOID_FACTOR 0.03f
 #define BOID_ALIGNMENT_FACTOR 0.05f
-#define BOID_COHESION_FACTOR 0.0005f
+#define BOID_COHESION_FACTOR 0.001f
 
 #define BOID_AVOID_RADIUS_SQ (BOID_AVOID_RADIUS * BOID_AVOID_RADIUS)
 #define BOID_MOUSE_AVOID_RADIUS_SQ (BOID_MOUSE_AVOID_RADIUS * BOID_MOUSE_AVOID_RADIUS)
 #define BOID_VISIBLE_RADIUS_SQ (BOID_VISIBLE_RADIUS * BOID_VISIBLE_RADIUS)
 
+#define CHUNK_SIZE_BOIDS 1024
+#define CHUNK_SIZE_PIXELS BOID_VISIBLE_RADIUS
+
+// <======================================== STRUCTURES AND TYPEDEFS =======================================>
 
 typedef struct {
     Vector2 pos;
     Vector2 speed;
     Vector2 visualSpeed;
-    // float direction;
 } Boid;
 
+typedef uint16_t BoidIndex;
+typedef uint16_t ChunkSize;
+
+typedef struct {
+    BoidIndex boids[CHUNK_SIZE_BOIDS]; // Array of boids
+    ChunkSize count; // Boids count
+} Chunk;
+
+typedef struct {
+    Chunk *chunks;
+    int screenWidth, screenHeight;
+    uint16_t rows, cols; // Number of chunks by width/height
+    uint32_t chunksCount;
+} Grid;
+
+// <============================================ GRID AND CHUNKS ===========================================>
+
+// Fill the chunks with zeros (clear)
+void ClearGrid(Grid *grid) {
+    for (uint32_t i = 0; i < grid->chunksCount; i++) {
+        grid->chunks[i].count = 0;
+    }
+}
+
+// Fill chunks with boids
+void FillGrid(Grid *grid, Boid *boids) {
+    for (uint16_t i = 0; i < BOIDS_COUNT; i++) {
+        Boid *boid = &boids[i];
+
+        float x = boid->pos.x;
+        float y = boid->pos.y;
+
+        if (x < 0) x = 0;
+        else if (x > grid->screenWidth) x = grid->screenWidth;
+        if (y < 0) y = 0;
+        else if (y > grid->screenHeight) y = grid->screenHeight;
+        
+        uint16_t chunkX = x / CHUNK_SIZE_PIXELS;
+        uint16_t chunkY = y / CHUNK_SIZE_PIXELS;
+        uint32_t chunkIndex = chunkX + chunkY*grid->cols;
+
+        Chunk *chunk = &grid->chunks[chunkIndex];
+
+        if (chunk->count < CHUNK_SIZE_BOIDS)
+            chunk->boids[chunk->count++] = i;
+    }
+}
+
+// Add data to the grid, completely refill chunks (delete and recrate all chunks)
+void InitGrid(Grid *grid, Boid *boids, int screenWidth, int screenHeight) {
+    grid->screenWidth = screenWidth;
+    grid->screenHeight = screenHeight;
+    grid->cols = (uint16_t)(screenWidth/CHUNK_SIZE_PIXELS) + 1;
+    grid->rows = (uint16_t)(screenHeight/CHUNK_SIZE_PIXELS) + 1;
+    grid->chunksCount = grid->rows * grid->cols;
+
+    if (grid->chunks != NULL) {
+        free(grid->chunks);
+    }
+    grid->chunks = RL_CALLOC(grid->chunksCount, sizeof(Chunk));
+
+    FillGrid(grid, boids);
+}
+
+void GetNeighbors(Grid* grid, Vector2 pos, BoidIndex *neighbors, BoidIndex *neighborsCount, BoidIndex maxNeighbors) {
+    if (pos.x < 0) pos.x = 0;
+    else if (pos.x > grid->screenWidth) pos.x = grid->screenWidth;
+    if (pos.y < 0) pos.y = 0;
+    else if (pos.y > grid->screenHeight) pos.y = grid->screenHeight;
+
+    int32_t chunkX = pos.x / CHUNK_SIZE_PIXELS;
+    int32_t chunkY = pos.y / CHUNK_SIZE_PIXELS;
+
+    *neighborsCount = 0;
+
+    for (int32_t x = chunkX-1; x <= chunkX+1; x++) {
+        for (int32_t y = chunkY-1; y <= chunkY+1; y++) {
+            if ((x < 0) || (x >= grid->cols) || (y < 0) || y >= grid->rows) continue;
+
+            uint32_t chunkIndex = x + y*grid->cols;
+            Chunk *chunk = &grid->chunks[chunkIndex];
+
+            for (ChunkSize i = 0; i < chunk->count; i++) {
+                if (*neighborsCount >= maxNeighbors)
+                    return;
+                neighbors[(*neighborsCount)++] = chunk->boids[i];
+            }
+        }
+    }
+}
+
+// <================================================= BOIDS ================================================>
 
 // Push the boid away from the bound
 void BoidBound(Boid *boid, int screenWidth, int screenHeight) {
@@ -62,29 +159,31 @@ void BoidNormalSpeed(Boid *boid) {
         boid->speed = Vector2Scale(boid->speed, BOID_MIN_SPEED/speed);
 }
 
-// Update boid rules:
-//  1. separation: steer to avoid crowding local flockmates
-//  2. alignment: steer towards the average heading of local flockmates
-//  3. cohesion: steer to move towards the average position (center of mass) of local flockmates
-void UpdateBoid(Boid *boids, size_t boidIndex, bool mouseAvoid, Vector2 mousePosition) {
+/* Update boid rules:
+    1. separation: steer to avoid crowding local flockmates
+    2. alignment: steer towards the average heading of local flockmates
+    3. cohesion: steer to move towards the average position (center of mass) of local flockmates */
+void UpdateBoid(Boid *boids, Grid *grid, BoidIndex boidIndex, bool mouseAvoid, Vector2 mousePosition, BoidIndex* neighbors, BoidIndex maxNeighbors) {
     Boid *boid = &boids[boidIndex];
     Vector2 close = { 0 }; // Avoid vector
-    size_t neighborsCount = 0;
+    BoidIndex neighborsCount = 0;
     Vector2 neighborsSpeed = { 0 }; // Alignment speed vector
     Vector2 neighborsPos = { 0 }; // Cohesion position vector
     
-    for (size_t i = 0; i < BOIDS_COUNT; i++) {
-        if (i == boidIndex) continue;
+    BoidIndex allNeighborsCount = 0;
+    GetNeighbors(grid, boid->pos, neighbors, &allNeighborsCount, maxNeighbors);
+    
+    for (BoidIndex i = 0; i < allNeighborsCount; i++) {
+        BoidIndex otherBoidIndex = neighbors[i];
+        if (otherBoidIndex == boidIndex) continue;
 
-        Boid *otherBoid = &boids[i];
+        Boid *otherBoid = &boids[otherBoidIndex];
         Vector2 distanceV = Vector2Subtract(boid->pos, otherBoid->pos);
         float distance_sqr = Vector2LengthSqr(distanceV);
         
-        // Calculate avoid
-        if (distance_sqr < BOID_AVOID_RADIUS_SQ)
-            close = Vector2Add(close, distanceV);
-        
-        if (distance_sqr < BOID_VISIBLE_RADIUS_SQ && distance_sqr > BOID_AVOID_RADIUS_SQ) {
+        if (distance_sqr < BOID_AVOID_RADIUS_SQ) {
+            close = Vector2Add(close, distanceV);  // Calculate avoid
+        } else if (distance_sqr < BOID_VISIBLE_RADIUS_SQ) {
             neighborsCount++;
             neighborsSpeed = Vector2Add(neighborsSpeed, otherBoid->speed); // Calculate alignment
             neighborsPos = Vector2Add(neighborsPos, otherBoid->pos); // Calculate cohesion
@@ -120,8 +219,6 @@ void DrawBoid(Boid *boid, Color color) {
     Vector2 normalSpeed = Vector2Normalize(boid->visualSpeed);
     float sinRotation = normalSpeed.x;
     float cosRotation = -normalSpeed.y;
-    // float sinRotation = sinf(boid->direction);
-    // float cosRotation = cosf(boid->direction);
 
     Vector2 p1 = {boid->pos.x + 0*cosRotation + (BOID_HEIGHT/2.0)*sinRotation,
                   boid->pos.y + 0*sinRotation - (BOID_HEIGHT/2.0)*cosRotation};
@@ -133,23 +230,28 @@ void DrawBoid(Boid *boid, Color color) {
     DrawTriangle(p1, p2, p3, color);
 }
 
+// <================================================= MAIN =================================================>
 
 int main(int argc, char *argv[]) {
     SetTraceLogLevel(LOG_WARNING);
+    SetConfigFlags(FLAG_WINDOW_RESIZABLE);
     InitWindow(WINDOW_WIDTH, WINDOW_HEIGHT, "Boids");
     SetTargetFPS(60);
 
-    // Boids array
-    Boid *boids = RL_CALLOC(BOIDS_COUNT, sizeof(Boid));
+    Boid *boids = RL_CALLOC(BOIDS_COUNT, sizeof(Boid)); // Boids array
+    Grid grid = { 0 }; // Grid of chunks
 
-    for (size_t i = 0; i < BOIDS_COUNT; i++) {
+    for (BoidIndex i = 0; i < BOIDS_COUNT; i++) {
         Boid *boid = &boids[i];
         boid->pos = (Vector2){GetRandomValue(0, WINDOW_WIDTH), GetRandomValue(0, WINDOW_HEIGHT)};
         boid->speed = (Vector2){GetRandomValue(-10, 10)/10.0, GetRandomValue(-10, 10)/10.0};
-        // boid->direction = atan2f(boid->speed.x, -boid->speed.y);
     }
+    InitGrid(&grid, boids, GetScreenWidth(), GetScreenHeight());
 
     bool pause = false, showVisibleCircles = false, mouseAvoid = false;
+
+    const BoidIndex maxNeighbors = 9 * CHUNK_SIZE_BOIDS;
+    BoidIndex boidNeighbors[maxNeighbors];
 
     while (!WindowShouldClose()) {
         if (IsKeyPressed(KEY_SPACE)) pause = !pause;
@@ -160,36 +262,40 @@ int main(int argc, char *argv[]) {
         int screenWidth = GetScreenWidth();
         int screenHeight = GetScreenHeight();
         
-        if (!pause) {
-            for (size_t i = 0; i < BOIDS_COUNT; i++) {
+        if (!pause || (pause && IsKeyPressed(KEY_ENTER))) {
+            if ((grid.screenWidth != screenWidth) || (grid.screenHeight != screenHeight))
+                InitGrid(&grid, boids, screenWidth, screenHeight);
+            
+            for (BoidIndex i = 0; i < BOIDS_COUNT; i++) {
                 Boid *boid = &boids[i];
-                // Vector2 oldSpeed = boid->speed;
 
                 BoidBound(boid, screenWidth, screenHeight);
-                UpdateBoid(boids, i, mouseAvoid, mousePosition);
+                UpdateBoid(boids, &grid, i, mouseAvoid, mousePosition, boidNeighbors, maxNeighbors);
                 BoidNormalSpeed(boid);
 
                 boid->visualSpeed.x = boid->visualSpeed.x*0.95f + boid->speed.x*0.05f;
                 boid->visualSpeed.y = boid->visualSpeed.y*0.95f + boid->speed.y*0.05f;
-                // boid->direction = atan2f(boid->visualSpeed.x, -boid->visualSpeed.y);
 
                 boid->pos = Vector2Add(boid->pos, boid->speed);
             }
+
+            ClearGrid(&grid);
+            FillGrid(&grid, boids);
         }
-        
+
         BeginDrawing();
             ClearBackground(RAYWHITE);
 
             // Draw boid's visible area
             if (showVisibleCircles) {
-                for (size_t i = 0; i < BOIDS_COUNT; i++) {
+                for (BoidIndex i = 0; i < BOIDS_COUNT; i++) {
                     Boid *boid = &boids[i];
                     DrawCircleV(boid->pos, BOID_VISIBLE_RADIUS, (i == 0)? (Color){230, 41, 55, 10} : (Color){0, 121, 241, 10});                
                 }
             }
 
             // Draw boids
-            for (size_t i = 0; i < BOIDS_COUNT; i++) {
+            for (BoidIndex i = 0; i < BOIDS_COUNT; i++) {
                 Boid *boid = &boids[i];
                 DrawBoid(boid, (i == 0)? RED : BLUE);
                 // DrawText(TextFormat("%d", i), boid->pos.x, boid->pos.y, 20, BLACK);
@@ -208,6 +314,7 @@ int main(int argc, char *argv[]) {
     }
 
     RL_FREE(boids);
+    RL_FREE(grid.chunks);
     CloseWindow();
     
     return 0;
