@@ -107,33 +107,6 @@ void InitGrid(Grid *grid, Boid *boids, int screenWidth, int screenHeight) {
     FillGrid(grid, boids);
 }
 
-void GetNeighbors(Grid* grid, Vector2 pos, BoidIndex *neighbors, BoidIndex *neighborsCount, BoidIndex maxNeighbors) {
-    if (pos.x < 0) pos.x = 0;
-    else if (pos.x > grid->screenWidth) pos.x = grid->screenWidth;
-    if (pos.y < 0) pos.y = 0;
-    else if (pos.y > grid->screenHeight) pos.y = grid->screenHeight;
-
-    int32_t chunkX = pos.x / CHUNK_SIZE_PIXELS;
-    int32_t chunkY = pos.y / CHUNK_SIZE_PIXELS;
-
-    *neighborsCount = 0;
-
-    for (int32_t x = chunkX-1; x <= chunkX+1; x++) {
-        for (int32_t y = chunkY-1; y <= chunkY+1; y++) {
-            if ((x < 0) || (x >= grid->cols) || (y < 0) || y >= grid->rows) continue;
-
-            uint32_t chunkIndex = x + y*grid->cols;
-            Chunk *chunk = &grid->chunks[chunkIndex];
-
-            for (ChunkSize i = 0; i < chunk->count; i++) {
-                if (*neighborsCount >= maxNeighbors)
-                    return;
-                neighbors[(*neighborsCount)++] = chunk->boids[i];
-            }
-        }
-    }
-}
-
 // <================================================= BOIDS ================================================>
 
 // Push the boid away from the bound
@@ -163,30 +136,49 @@ void BoidNormalSpeed(Boid *boid) {
     1. separation: steer to avoid crowding local flockmates
     2. alignment: steer towards the average heading of local flockmates
     3. cohesion: steer to move towards the average position (center of mass) of local flockmates */
-void UpdateBoid(Boid *boids, Grid *grid, BoidIndex boidIndex, bool mouseAvoid, Vector2 mousePosition, BoidIndex* neighbors, BoidIndex maxNeighbors) {
+void UpdateBoid(Boid *boids, Grid *grid, BoidIndex boidIndex, bool mouseAvoid, Vector2 mousePosition) {
     Boid *boid = &boids[boidIndex];
     Vector2 close = { 0 }; // Avoid vector
     BoidIndex neighborsCount = 0;
     Vector2 neighborsSpeed = { 0 }; // Alignment speed vector
-    Vector2 neighborsPos = { 0 }; // Cohesion position vector
+    Vector2 neighborsPos = { 0 }; // Cohesion position vectorallNeighborsCount
     
-    BoidIndex allNeighborsCount = 0;
-    GetNeighbors(grid, boid->pos, neighbors, &allNeighborsCount, maxNeighbors);
-    
-    for (BoidIndex i = 0; i < allNeighborsCount; i++) {
-        BoidIndex otherBoidIndex = neighbors[i];
-        if (otherBoidIndex == boidIndex) continue;
+    // Position limitation by screen size
+    Vector2 pos = boid->pos;
+    if (pos.x < 0) pos.x = 0;
+    else if (pos.x > grid->screenWidth) pos.x = grid->screenWidth;
+    if (pos.y < 0) pos.y = 0;
+    else if (pos.y > grid->screenHeight) pos.y = grid->screenHeight;
 
-        Boid *otherBoid = &boids[otherBoidIndex];
-        Vector2 distanceV = Vector2Subtract(boid->pos, otherBoid->pos);
-        float distance_sqr = Vector2LengthSqr(distanceV);
+    // Get boid's chunk
+    int32_t chunkX = boid->pos.x / CHUNK_SIZE_PIXELS;
+    int32_t chunkY = boid->pos.y / CHUNK_SIZE_PIXELS;
+
+    // 8 neighboring chunks + current chunk
+    for (int32_t x = chunkX-1; x <= chunkX+1; x++) {
+        for (int32_t y = chunkY-1; y <= chunkY+1; y++) {
+            if ((x < 0) || (x >= grid->cols) || (y < 0) || y >= grid->rows) continue;
+
+            uint32_t chunkIndex = x + y*grid->cols;
+            Chunk *chunk = &grid->chunks[chunkIndex];
+
+            // Processing boids from neighboring chunks
+            for (BoidIndex i = 0; i < chunk->count; i++) {
+                BoidIndex otherBoidIndex = chunk->boids[i];
+                if (otherBoidIndex == boidIndex) continue;
+
+                Boid *otherBoid = &boids[otherBoidIndex];
+                Vector2 distanceV = Vector2Subtract(boid->pos, otherBoid->pos);
+                float distance_sqr = Vector2LengthSqr(distanceV);
         
-        if (distance_sqr < BOID_AVOID_RADIUS_SQ) {
-            close = Vector2Add(close, distanceV);  // Calculate avoid
-        } else if (distance_sqr < BOID_VISIBLE_RADIUS_SQ) {
-            neighborsCount++;
-            neighborsSpeed = Vector2Add(neighborsSpeed, otherBoid->speed); // Calculate alignment
-            neighborsPos = Vector2Add(neighborsPos, otherBoid->pos); // Calculate cohesion
+                if (distance_sqr < BOID_AVOID_RADIUS_SQ) {
+                    close = Vector2Add(close, distanceV);  // Calculate avoid
+                } else if (distance_sqr < BOID_VISIBLE_RADIUS_SQ) {
+                    neighborsCount++;
+                    neighborsSpeed = Vector2Add(neighborsSpeed, otherBoid->speed); // Calculate alignment
+                    neighborsPos = Vector2Add(neighborsPos, otherBoid->pos); // Calculate cohesion
+                }
+            }
         }
     }
 
@@ -250,9 +242,6 @@ int main(int argc, char *argv[]) {
 
     bool pause = false, showVisibleCircles = false, mouseAvoid = false;
 
-    const BoidIndex maxNeighbors = 9 * CHUNK_SIZE_BOIDS;
-    BoidIndex boidNeighbors[maxNeighbors];
-
     Camera2D camera = { 0 };
     camera.zoom = 1.0f;
 
@@ -291,7 +280,7 @@ int main(int argc, char *argv[]) {
                 Boid *boid = &boids[i];
 
                 BoidBound(boid, screenWidth, screenHeight);
-                UpdateBoid(boids, &grid, i, mouseAvoid, mousePosition, boidNeighbors, maxNeighbors);
+                UpdateBoid(boids, &grid, i, mouseAvoid, mousePosition);
                 BoidNormalSpeed(boid);
 
                 boid->visualSpeed.x = boid->visualSpeed.x*0.95f + boid->speed.x*0.05f;
