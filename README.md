@@ -11,5 +11,5 @@ A [boid](https://en.wikipedia.org/wiki/Boids) simulation writen in C and Raylib.
 
 ## Build
 ```sh
-cc main.c -o boids -lraylib -O2
+cc main.c -o boids -lraylib -lm -O2
 ```
