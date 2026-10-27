@@ -10,6 +10,8 @@
 
 #define WINDOW_WIDTH 800
 #define WINDOW_HEIGHT 450
+#define FPS 60
+#define TPS 60
 
 #define BOIDS_COUNT 1000
 #define BOID_WIDTH 20
@@ -23,10 +25,24 @@
 #define BOID_MOUSE_AVOID_RADIUS 70
 #define BOID_VISIBLE_RADIUS 70
 
+// #define BOIDS_COUNT 60000
+// #define BOID_WIDTH 2
+// #define BOID_HEIGHT 3
+
+// #define BOID_MAX_SPEED 0.25f
+// #define BOID_MIN_SPEED 0.1f
+
+// #define BOID_BOUND_PADDING 5
+// #define BOID_AVOID_RADIUS 3
+// #define BOID_MOUSE_AVOID_RADIUS 7
+// #define BOID_VISIBLE_RADIUS 7
+
+
 #define BOID_BOUND_FACTOR 0.08f
 #define BOID_AVOID_FACTOR 0.03f
 #define BOID_ALIGNMENT_FACTOR 0.05f
 #define BOID_COHESION_FACTOR 0.001f
+#define MOUSE_AVOID_STRENGTH 3
 
 #define BOID_AVOID_RADIUS_SQ (BOID_AVOID_RADIUS * BOID_AVOID_RADIUS)
 #define BOID_MOUSE_AVOID_RADIUS_SQ (BOID_MOUSE_AVOID_RADIUS * BOID_MOUSE_AVOID_RADIUS)
@@ -35,12 +51,15 @@
 #define CHUNK_SIZE_BOIDS 1024
 #define CHUNK_SIZE_PIXELS BOID_VISIBLE_RADIUS
 
+#define MAX(a, b) (((a) > (b)) ? (a) : (b))
+#define MIN(a, b) (((a) < (b)) ? (a) : (b))
+
 // <======================================== STRUCTURES AND TYPEDEFS =======================================>
 
 typedef struct {
     Vector2 pos;
     Vector2 speed;
-    Vector2 visualSpeed;
+    Vector2 visualSpeed; // Speed vector for visual exponential smoothing
 } Boid;
 
 typedef uint16_t BoidIndex;
@@ -69,7 +88,7 @@ void ClearGrid(Grid *grid) {
 
 // Fill chunks with boids
 void FillGrid(Grid *grid, Boid *boids) {
-    for (uint16_t i = 0; i < BOIDS_COUNT; i++) {
+    for (BoidIndex i = 0; i < BOIDS_COUNT; i++) {
         Boid *boid = &boids[i];
 
         float x = boid->pos.x;
@@ -141,7 +160,7 @@ void UpdateBoid(Boid *boids, Grid *grid, BoidIndex boidIndex, bool mouseAvoid, V
     Vector2 close = { 0 }; // Avoid vector
     BoidIndex neighborsCount = 0;
     Vector2 neighborsSpeed = { 0 }; // Alignment speed vector
-    Vector2 neighborsPos = { 0 }; // Cohesion position vectorallNeighborsCount
+    Vector2 neighborsPos = { 0 }; // Cohesion position vector
     
     // Position limitation by screen size
     Vector2 pos = boid->pos;
@@ -199,7 +218,7 @@ void UpdateBoid(Boid *boids, Grid *grid, BoidIndex boidIndex, bool mouseAvoid, V
     if (mouseAvoid) {
         Vector2 distance = Vector2Subtract(boid->pos, mousePosition);
         if (Vector2LengthSqr(distance) < BOID_MOUSE_AVOID_RADIUS_SQ)
-            close = Vector2Add(close, Vector2Scale(distance, 3));
+            close = Vector2Add(close, Vector2Scale(distance, MOUSE_AVOID_STRENGTH));
     }
 
     // Avoid
@@ -228,11 +247,12 @@ int main(int argc, char *argv[]) {
     SetTraceLogLevel(LOG_WARNING);
     SetConfigFlags(FLAG_WINDOW_RESIZABLE);
     InitWindow(WINDOW_WIDTH, WINDOW_HEIGHT, "Boids");
-    SetTargetFPS(60);
+    SetTargetFPS(FPS);
 
     Boid *boids = RL_CALLOC(BOIDS_COUNT, sizeof(Boid)); // Boids array
     Grid grid = { 0 }; // Grid of chunks
 
+    // Spawn boids
     for (BoidIndex i = 0; i < BOIDS_COUNT; i++) {
         Boid *boid = &boids[i];
         boid->pos = (Vector2){GetRandomValue(0, WINDOW_WIDTH), GetRandomValue(0, WINDOW_HEIGHT)};
@@ -245,7 +265,18 @@ int main(int argc, char *argv[]) {
     Camera2D camera = { 0 };
     camera.zoom = 1.0f;
 
+    double targetFrameTime = 1.0 / FPS;
+    double renderTime = 0.0;
+    double accTime = 0.0;
+
+    float tps = TPS;
+    int iterationNumber = 0;
+    int nextUpdatedBoid = 0;
+    int boidsUpdated = 0;
+
     while (!WindowShouldClose()) {
+        double frameStartTime = GetTime();
+
         // Keys
         if (IsKeyPressed(KEY_SPACE)) pause = !pause;
         if (IsKeyPressed(KEY_S)) showVisibleCircles = !showVisibleCircles;
@@ -253,8 +284,8 @@ int main(int argc, char *argv[]) {
 
         // Camera
         float wheel = GetMouseWheelMove();
-        if (IsKeyPressed(KEY_MINUS) || IsKeyPressed(KEY_KP_SUBTRACT)) wheel = -1.0;
-        if (IsKeyPressed(KEY_KP_ADD) || (IsKeyPressed(KEY_EQUAL) && (IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT)))) wheel = 1.0;
+        if (IsKeyPressed(KEY_MINUS) || IsKeyPressed(KEY_KP_SUBTRACT) || IsKeyPressedRepeat(KEY_MINUS) || IsKeyPressedRepeat(KEY_KP_SUBTRACT)) wheel = -1.0;
+        if (IsKeyPressed(KEY_KP_ADD) || IsKeyPressed(KEY_EQUAL) || IsKeyPressedRepeat(KEY_KP_ADD) || IsKeyPressedRepeat(KEY_EQUAL)) wheel = 1.0;
         if (wheel != 0) {
             Vector2 mouseWorldPos = GetScreenToWorld2D(GetMousePosition(), camera);
             camera.offset = GetMousePosition();
@@ -272,31 +303,86 @@ int main(int argc, char *argv[]) {
         int screenWidth = GetScreenWidth();
         int screenHeight = GetScreenHeight();
         
+        renderTime += (GetTime() - frameStartTime);
+
         if (!pause || (pause && IsKeyPressed(KEY_ENTER))) {
-            if ((grid.screenWidth != screenWidth) || (grid.screenHeight != screenHeight))
-                InitGrid(&grid, boids, screenWidth, screenHeight);
+            /*
+            [  ] - cycle iteration timeline
+            ###  - update
+            @    - draw
+            .    - wait
             
-            for (BoidIndex i = 0; i < BOIDS_COUNT; i++) {
-                Boid *boid = &boids[i];
+            60 FPS, 60 TPS: [###@....] [###@....] (1 update and 1 draw per iteration)
+            30 FPS, 60 TPS: [######@.] [######@.] (2 updates and 1 draw per iteration)
+            60 FPS, 30 TPS: [@.......] [###@....] (1/2 updates and 1 draw per iteration)
+            */
+            
+            double updateTime = targetFrameTime - renderTime;
+            updateTime *= 0.90; // Use 90% of the aviable time for updating
 
-                BoidBound(boid, screenWidth, screenHeight);
-                UpdateBoid(boids, &grid, i, mouseAvoid, mousePosition);
-                BoidNormalSpeed(boid);
+            double startUpdteTime = GetTime();
+            double endUpdateTime = startUpdteTime + updateTime;
 
-                boid->visualSpeed.x = boid->visualSpeed.x*0.95f + boid->speed.x*0.05f;
-                boid->visualSpeed.y = boid->visualSpeed.y*0.95f + boid->speed.y*0.05f;
+            // Incrase the accumulator
+            accTime += (double)TPS / FPS;
 
-                boid->pos = Vector2Add(boid->pos, boid->speed);
+            if (accTime >= 1.0) {
+                if ((grid.screenWidth != screenWidth) || (grid.screenHeight != screenHeight))
+                    InitGrid(&grid, boids, screenWidth, screenHeight);
+
+                bool stop = false;
+                while (accTime > 0) {
+                    for (BoidIndex i = nextUpdatedBoid; i < BOIDS_COUNT; i++) {
+                        Boid *boid = &boids[i];
+
+                        BoidBound(boid, screenWidth, screenHeight);
+                        UpdateBoid(boids, &grid, i, mouseAvoid, mousePosition);
+                        BoidNormalSpeed(boid);
+
+                        boid->visualSpeed.x = boid->visualSpeed.x*0.95f + boid->speed.x*0.05f;
+                        boid->visualSpeed.y = boid->visualSpeed.y*0.95f + boid->speed.y*0.05f;
+
+                        boid->pos = Vector2Add(boid->pos, boid->speed);
+
+                        boidsUpdated++;
+
+                        // Check the time every 128 boids
+                        if ((i % 128 == 0) && (GetTime() > endUpdateTime)) {
+                            nextUpdatedBoid = i + 1;
+                            stop = true;
+                            break;
+                        }
+                    }
+                
+                    if (!stop) {
+                        accTime -= 1.0;
+                        nextUpdatedBoid = 0;
+                    } else break;
+                }
+
+                accTime = MIN(accTime, 100);
+                
+                ClearGrid(&grid);
+                FillGrid(&grid, boids);
             }
-
-            ClearGrid(&grid);
-            FillGrid(&grid, boids);
         }
 
+        iterationNumber++;
+        if (iterationNumber >= GetFPS()) {
+            tps = (double)boidsUpdated / BOIDS_COUNT;
+            iterationNumber = 0;
+            boidsUpdated = 0;
+        }
+
+        renderTime = 0;
+        double drawingStartTime = GetTime();
+        
         BeginDrawing();
             ClearBackground(RAYWHITE);
             BeginMode2D(camera);
 
+            DrawRectangleLines(0, 0, screenWidth, screenHeight, BLACK);
+            
             // Draw boid's visible area
             if (showVisibleCircles) {
                 for (BoidIndex i = 0; i < BOIDS_COUNT; i++) {
@@ -305,11 +391,29 @@ int main(int argc, char *argv[]) {
                 }
             }
 
-            // Draw boids
-            for (BoidIndex i = 0; i < BOIDS_COUNT; i++) {
-                Boid *boid = &boids[i];
-                DrawBoid(boid, (i == 0)? RED : BLUE);
-                // DrawText(TextFormat("%d", i), boid->pos.x, boid->pos.y, 20, BLACK);
+            // Draw ALL boids
+            // for (BoidIndex i = 0; i < BOIDS_COUNT; i++) {
+            //     Boid *boid = &boids[i];
+            //     DrawBoid(boid, (i == 0)? RED : BLUE);
+            // }
+
+            // Get the corners of the screen in the coordinates of thee game world
+            Vector2 cornerTopLeft = GetScreenToWorld2D((Vector2){0.0, 0.0}, camera);
+            Vector2 cornerBottomRight = GetScreenToWorld2D((Vector2){screenWidth, screenHeight}, camera);
+            if (cornerTopLeft.x < 0.0) cornerTopLeft.x = 0.0;
+            if (cornerTopLeft.y < 0.0) cornerTopLeft.y = 0.0;
+
+            // Draw only those chunks that are visible on the screen
+            for (int chunkY = cornerTopLeft.y / CHUNK_SIZE_PIXELS; chunkY <= (cornerBottomRight.y / CHUNK_SIZE_PIXELS) + 1 && chunkY < grid.rows; chunkY++) {
+                for (int chunkX = cornerTopLeft.x / CHUNK_SIZE_PIXELS; chunkX <= (cornerBottomRight.x / CHUNK_SIZE_PIXELS) + 1 && chunkX < grid.cols; chunkX++) {
+                    uint32_t chunkIndex = chunkY*grid.cols + chunkX;
+                    Chunk *chunk = &grid.chunks[chunkIndex];
+                    for (int i = 0; i < chunk->count; i++) {
+                        BoidIndex boidIndex = chunk->boids[i];
+                        Boid *boid = &boids[boidIndex];
+                        DrawBoid(boid, (boidIndex == 0)? RED : BLUE);
+                    }
+                }
             }
 
             // Draw a circle around the mouse
@@ -321,13 +425,17 @@ int main(int argc, char *argv[]) {
             // Draw "Paused" label, if the simulation is paused
             if (pause)
                 DrawText("Paused", screenWidth - 85, 10, 20, BLACK);
-            
+
             DrawFPS(10, 10);
+            DrawText(TextFormat("%.0f TPS", tps), 10, 30, 20, BLACK);
+
+        renderTime += (GetTime() - drawingStartTime);
         EndDrawing();
     }
 
-    RL_FREE(boids);
-    RL_FREE(grid.chunks);
+    free(boids);
+    free(grid.chunks);
+
     CloseWindow();
     
     return 0;
